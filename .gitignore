@@ -1,0 +1,14 @@
+## Racket specific
+
+## Emacs specific
+\#*\#
+
+## Generic files to ignore
+*~
+*.lock
+*.DS_Store
+*.swp
+*.log
+*.out
+
+## Project specific
