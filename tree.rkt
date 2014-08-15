@@ -2,41 +2,83 @@
 
 (require rosette/lib/meta/meta)
 
-; We represent tree using nested lists.  Each node is a
-; list consisting of a unique integer id, a list of attribute/value pairs
-; and  a possibly empty list of child nodes.  Ids in a well-formed tree
-; must cover a prefix of the natural numbers.
+;; A tree is represented as nested lists, with accessor functions defined below:
+(define node-parent-child car)    ; The name of this child node with respect to
+                                  ; its parent, 'root' for the root node.
+                                  ; Eg. child1, child2, etc
 
-(define node-type       car)
-(define node-class      cadr)
-(define node-attributes caddr)
-(define node-children   cadddr)
+(define node-class        cadr)   ; The class that this node belongs to. This
+                                  ; determines the type of attributes and
+                                  ; children the node has
 
-(define (get-attribute n att) (unbox (cdr (assoc att (node-attributes n)))))
+(define node-attributes   caddr)  ; An associative list mapping attribute names
+                                  ; to a bit indicating whether they have been
+                                  ; assigned.
+
+(define node-children     cadddr) ; A list of the children of this node. May be
+                                  ; empty for leaf nodes
+
+(define (get-attribute n attr-name)
+  (unbox (cdr (assoc attr-name (node-attributes n)))))
 (define (get-child n child)
   (if (null? child)
       n
       (assoc child (node-children n))))
 
-(define (set-attribute! n att val)
-  (map (lambda (p) (if (equal? att (car p))
+(define (set-attribute! n attr-name val)
+  (map (lambda (p) (if (equal? attr-name (car p))
                        (set-box! (cdr p) val)
                        (void)))
        (node-attributes n))
   (void))
 
-(define assign-class car)
-(define assign-base  cadr)
-(define assign-name  caddr)
+; An attribute is represented by a list of symbols, containing:
+(define assign-class car)   ; The class of the attribute
+(define assign-child cadr)  ; The child name of the class, self if it is '()
+(define assign-name  caddr) ; The name of the actual attribute
 
+;; The example grammar:
+;;
+;;   interface Top {}
+;;   interface Node {
+;;     var a: int ;
+;;     var b: int ;
+;;   }
+;;
+;;   class Root: Top {
+;;     children {
+;;       child: Node;
+;;     }
+;;
+;;     actions{
+;;       child.a := child.b;
+;;     }
+;;   }
+;;
+;;   class MidNode: Node {
+;;     children {
+;;       left:  Node;
+;;       right: Node;
+;;     }
+;;     actions {
+;;       left.a  := a;
+;;       right.a := a;
+;;       b       := left.b + right.b;
+;;     }
+;;   }
+;;
+;;   class Leaf: Node {
+;;     actions {
+;;       b := 0;
+;;     }
+;;   }
+
+;; Here are macros to facilitate the construction of a tree
 (define (eg-attrs) `[(a . ,(box #f)) (b . ,(box #f))])
 
 (define (eg-leaf1) `(left leaf ,(eg-attrs) []))
 
 (define (eg-leaf2) `(right leaf ,(eg-attrs) []))
-
-;;(define-syntax-rule (gen-attrs attrs ...)
-
 
 (define-syntax-rule (leaf name)
   `(name leaf ,(eg-attrs) []))
@@ -47,21 +89,14 @@
 (define-syntax-rule (root name child)
   `(name root [] [,child]))
 
-;;(define (eg-midnode)
-;;  `(child midnode
-;;          ,(eg-attrs)
-;;          [,(eg-leaf1) ,(eg-leaf2)]))
-;;
-;;(define (eg-tree)
-;;  `(top root
-;;        []
-;;        [,(eg-midnode)]))
-
 (define (eg-tree)
   (root top (midnode child
                      (leaf left)
                      (leaf right))))
 
+;; The dependencies of our example schedule, endcoded as an associative list,
+;; with the first element being the attribute assigned, the rest are its
+;; dependencies.
 (define eg-deps
   '([(root child a)    (root child b)]
     [(midnode left a)  (midnode () a)]
@@ -69,6 +104,9 @@
     [(midnode () b)    (midnode left b) (midnode right b)]
     [(leaf () b)]))
 
+;; One valid schedule for the grammar, BU is bottom-up, TD is top-down, followed
+;; by an ordered list of attributes to be assigned on that traversal.
+;;
 (define eg-schedule
   '([BU (leaf () b)
         (midnode () b)]
@@ -76,13 +114,28 @@
         (midnode left a)
         (midnode right a)]))
 
-;;
+;; This schedule is invalid for general trees, but is valid for the example tree
+;; defined above. This is because the tree above is too short and the second BU
+;; traversal has the same effect as a TD one.
 (define eg-invalid-schedule
   '((BU (midnode () b)
         (root child a)
         (leaf () b))
     (BU (midnode left a)
         (midnode right a))))
+
+;; Checks that a specific schedule is valid on a specific tree. This is to be
+;; used later for synthesis and verification. It performs traversals specified
+;; by the schedule on the tree, setting attributes after checking that all their
+;; dependencies have been satisfied.
+(define (check-schedule sched tree)
+  (map (lambda (traversal)
+         (let ([type    (car traversal)]
+               [assigns (cdr traversal)])
+           (cond [(equal? type 'TD) (check-td assigns tree)]
+                 [(equal? type 'BU) (check-bu assigns tree)])))
+       sched)
+  tree)
 
 (define (check-td assigns tree)
   (unless (null? tree)
@@ -96,6 +149,8 @@
          (node-children tree))
     (check-assigns assigns tree)))
 
+;; Main function that checks the dependencies for one assignment. Also checks
+;; another constraint: every attribute is assigned to once.
 (define (check-assigns assigns tree)
   (let ([cur-assigns (filter (lambda (assign)
                                (equal? (assign-class assign)
@@ -106,7 +161,7 @@
     (map (lambda (assign)
            (assert (not (attr-value tree assign))) ; Single assignment
            (check-deps assign tree)
-           (set-attribute! (get-child tree (assign-base assign))
+           (set-attribute! (get-child tree (assign-child assign))
                            (assign-name assign)
                            #t))
          cur-assigns)))
@@ -119,18 +174,12 @@
 
 (define (attr-value tree attr)
   (get-attribute (get-child tree
-                            (assign-base attr))
+                            (assign-child attr))
                  (assign-name attr)))
 
-(define (check-schedule sched tree)
-  (map (lambda (traversal)
-         (let ([type    (car traversal)]
-               [assigns (cdr traversal)])
-           (cond [(equal? type 'TD) (check-td assigns tree)]
-                 [(equal? type 'BU) (check-bu assigns tree)])))
-       sched)
-  tree)
-
+;; check-schedule would pass for empty schedules since there are no conflicts as
+;; nothing is being assigned to. This function checks that all the attributes on
+;; the tree have been assigned after the traversals.
 (define (fully-assigned tree)
   (unless (null? tree)
     (map (lambda (attr)
@@ -140,6 +189,7 @@
          (node-children tree))
     (void)))
 
+;; Macros to generate an unfilled schedule of length up to d.
 (define-synthax (synth-schedule (attrs ...) #:depth d)
   #:assert (>= d 0)
   [choose '() (cons (cons [choose 'TD 'BU]
@@ -182,52 +232,38 @@
 ;;                           (midnode () b)
 ;;                           (leaf () b))))
 
+;; Schedule sketch generated using macros
+ (define sketch (synth-schedule ('(root child a)
+                                 '(midnode left a)
+                                 '(midnode right a)
+                                 '(midnode () b)
+                                 '(leaf () b)
+                                 ;'(leaf () no-op))
+                                 )
+                                #:depth 2))
 
-;; Synthesizing a tree
-(define-synthax (synth-tree name #:depth k)
-  #:assert (>= k 0)
+;; Synthesizes a schedule which works on the specific example tree
+(time
+ (solve/evaluate
+  (begin
+    (define t (eg-tree))
+    (check-schedule sketch t)
+    (fully-assigned t)
+    sketch)))
+
+;; Macro for synthesizing a tree of depth d , according to the grammar defined
+;; above.
+(define-synthax (synth-tree name #:depth d)
+  #:assert (>= d 0)
   [choose (leaf name)
           (midnode name
-                   (synth-tree left  #:depth (- k 1))
-                   (synth-tree right #:depth (- k 1)))])
+                   (synth-tree left  #:depth (- d 1))
+                   (synth-tree right #:depth (- d 1)))])
 
+;; Invalid schedule works for our example tree
+(check-schedule eg-invalid-schedule (eg-tree))
+
+;; We want to find a tree that does not satisfy our invalid schedule
 (define t (root top (synth-tree child #:depth 2)))
-(define model (verify (check-schedule eg-schedule t)))
+(define model (verify (check-schedule eg-invalid-schedule t)))
 (evaluate t model)
-
-;; Schedule sketch generated using macros
-;;(define sketch (synth-schedule ('(root child a)
-;;                                '(midnode left a)
-;;                                '(midnode right a)
-;;                                '(midnode () b)
-;;                                '(leaf () b)
-;;                                ;'(leaf () no-op))
-;;                                )
-;;                               #:depth 2))
-;;
-;;(time (solve/evaluate
-;;       (begin
-;;         (define a
-;;           (root top (midnode child
-;;                              (leaf left)
-;;                              (leaf right))))
-;;         (check-schedule sketch
-;;                         a)
-;;         (fully-assigned a)
-;;         sketch)))
-
-;; (define-synthax (schedule (attrs ...))
-;;   `([,(choose 'TD 'BU)
-;;      ,(choose attrs ...)
-;;      ,(choose attrs ...)
-;;      ]
-;;     [,(choose 'TD 'BU)
-;;      ,(choose attrs ...)
-;;      ,(choose attrs ...)
-;;      ,(choose attrs ...)
-;;      ]))
-
-;;(define model
-;;  (solve (check-schedule sketch
-;;                         (eg-tree))))
-;;(evaluate sketch model)
