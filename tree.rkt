@@ -2,6 +2,8 @@
 
 (require rosette/lib/meta/meta)
 
+(current-log-handler (log-handler #:info any/c))
+
 ;; A tree is represented as nested lists, with accessor functions defined below:
 (define node-parent-child car)    ; The name of this child node with respect to
                                   ; its parent, 'root' for the root node.
@@ -189,59 +191,39 @@
          (node-children tree))
     (void)))
 
-;; Macros to generate an unfilled schedule of length up to d.
-(define-synthax (synth-schedule (attrs ...) #:depth d)
-  #:assert (>= d 0)
-  [choose '() (cons (cons [choose 'TD 'BU]
-                          (schedule-assign (attrs ...) #:depth 3))
-                    (synth-schedule (attrs ...) #:depth (- d 1)))])
+;; convenience macro creating a list of size max by evaluating body ... for each i
+(define-syntax-rule (for/list ([i max]) body ...)
+  (let loop ([i 0])
+    (if (= i max)
+        '()
+        (cons (begin body ...) (loop (add1 i))))))
 
-(define-synthax (schedule-assign (attrs ...) #:depth d)
-  #:assert (>= d 0)
-  [choose '() (cons [choose attrs ...]
-                    (schedule-assign (attrs ...) #:depth (- d 1)))])
+(define (make-sketch attrs [bound  (length attrs)])
+  (define num-attrs (length attrs))
+  (define-symbolic* depth number?)
+  ; A 'bottom' or empty attribute used to make sure that every traversal has the
+  ; same number of attrs.  The checking code just ignores the empty attribute,
+  ; but having all traversals have equal length speeds things up by simplifying
+  ; the structure of the sketch value being created.
+  (define none '(#f #f #f))
+  (define longest-sched
+    (for/list ([i bound])
+      (local [(define-symbolic* td? boolean?)
+              (define-symbolic* attr? boolean? [num-attrs])] ; a list of size
+                                                             ; num-attrs,
+                                                             ; containing fresh
+                                                             ; booleans ...
+        (cons (if td? 'TD 'BU)
+              (map (lambda (a? a) (if a? a none)) attr? attrs)))))
+  ; return some prefix of the longest schedule ...
+  (take longest-sched depth))
 
-
-;; Attempt to generate a schedule sketch without using macros. Not working right
-;; now because these functions run in an (infinite?) loop when called
-(define (make-sketch low high alow ahigh alen attrs)
-  (define (attrs-helper n)
-    (assert >= n 0)
-    (if (= n 0) '()
-        (local ([define-symbolic* index number?])
-          (assert (>= index 0))
-          (assert (<= index alen))
-          (cons (list-ref attrs index)
-                (attrs-helper (- n 1))))))
-  (define (traversal-helper n)
-    (assert >= n 0)
-    (if (= n 0) '()
-        (local ([define-symbolic* numattrs number?]
-                [define-symbolic* td?      boolean?])
-          (assert (>= numattrs low))
-          (assert (<= numattrs high))
-          (cons (cons (if td? 'TD 'BU)
-                      (attrs-helper numattrs))
-                (traversal-helper (- n 1))))))
-  (traversal-helper (choose-number low high)))
-
-;;(define sketch
-;;  (make-sketch 1 2 2 3 5 '((root child a)
-;;                           (midnode left a)
-;;                           (midnode right a)
-;;                           (midnode () b)
-;;                           (leaf () b))))
-
-;; Schedule sketch generated using macros
- (define sketch (synth-schedule ('(root child a)
-                                 '(midnode left a)
-                                 '(midnode right a)
-                                 '(midnode () b)
-                                 '(leaf () b)
-                                 ;'(leaf () no-op))
-                                 )
-                                #:depth 2))
-
+(define sketch (make-sketch '((root child a)
+                              (midnode left a)
+                              (midnode right a)
+                              (midnode () b)
+                              (leaf () b))
+                            2))
 ;; Synthesizes a schedule which works on the specific example tree
 (time
  (solve/evaluate
@@ -249,21 +231,35 @@
     (define t (eg-tree))
     (check-schedule sketch t)
     (fully-assigned t)
+    (displayln (length (asserts)))
     sketch)))
 
-;; Macro for synthesizing a tree of depth d , according to the grammar defined
-;; above.
-(define-synthax (synth-tree name #:depth d)
-  #:assert (>= d 0)
-  [choose (leaf name)
-          (midnode name
-                   (synth-tree left  #:depth (- d 1))
-                   (synth-tree right #:depth (- d 1)))])
 
 ;; Invalid schedule works for our example tree
 (check-schedule eg-invalid-schedule (eg-tree))
 
+(define (make-tree name depth)
+  (assert (>= depth 0))
+  (define-symbolic* unroll? boolean?)
+  (if unroll?
+      (local [(define-symbolic* leaf? boolean?)]
+        (if leaf?
+            `(,name leaf ,(eg-attrs) [])
+            `(,name midnode ,(eg-attrs)
+                    [,(make-tree 'left (sub1 depth))
+                     ,(make-tree 'right (sub1 depth))])))
+      (assert #f)))
+
 ;; We want to find a tree that does not satisfy our invalid schedule
-(define t (root top (synth-tree child #:depth 2)))
+(define t (root top (make-tree 'child 2)))
 (define model (verify (check-schedule eg-invalid-schedule t)))
 (evaluate t model)
+
+(require (only-in racket match error-print-width))
+(define (expand v)
+   (match v
+     [(? union? v)
+      `(union ,@(map (lambda (gv) (cons (expand (car gv)) (expand (cdr gv))))
+                     (union-contents v)))]
+     [(? list? v) (map expand v)]
+     [_ v]))
