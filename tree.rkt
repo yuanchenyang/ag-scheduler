@@ -2,6 +2,15 @@
 
 (require rosette/lib/meta/meta)
 
+(require (only-in racket match error-print-width))
+(define (expand v)
+  (match v
+    [(? union? v)
+     `(union ,@(map (lambda (gv) (cons (expand (car gv)) (expand (cdr gv))))
+                    (union-contents v)))]
+    [(? list? v) (map expand v)]
+    [_ v]))
+
 (current-log-handler (log-handler #:info any/c))
 
 ;; A tree is represented as nested lists, with accessor functions defined below:
@@ -224,6 +233,7 @@
                               (midnode () b)
                               (leaf () b))
                             2))
+
 ;; Synthesizes a schedule which works on the specific example tree
 (time
  (solve/evaluate
@@ -234,9 +244,8 @@
     (displayln (length (asserts)))
     sketch)))
 
-
 ;; Invalid schedule works for our example tree
-(check-schedule eg-invalid-schedule (eg-tree))
+;(check-schedule eg-invalid-schedule (eg-tree))
 
 (define (make-tree name depth)
   (assert (>= depth 0))
@@ -244,22 +253,14 @@
   (if unroll?
       (local [(define-symbolic* leaf? boolean?)]
         (if leaf?
-            `(,name leaf ,(eg-attrs) [])
-            `(,name midnode ,(eg-attrs)
-                    [,(make-tree 'left (sub1 depth))
-                     ,(make-tree 'right (sub1 depth))])))
-      (assert #f)))
+            (list name 'leaf    (eg-attrs) '())
+            (list name 'midnode (eg-attrs)
+                  (list (make-tree 'left  (sub1 depth))
+                        (make-tree 'right (sub1 depth))))))
+        (assert #f)))
 
 ;; We want to find a tree that does not satisfy our invalid schedule
-(define t (root top (make-tree 'child 2)))
+(define t (root top (make-tree 'child 3)))
+;;(expand t)
 (define model (verify (check-schedule eg-invalid-schedule t)))
 (evaluate t model)
-
-(require (only-in racket match error-print-width))
-(define (expand v)
-   (match v
-     [(? union? v)
-      `(union ,@(map (lambda (gv) (cons (expand (car gv)) (expand (cdr gv))))
-                     (union-contents v)))]
-     [(? list? v) (map expand v)]
-     [_ v]))

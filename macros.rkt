@@ -17,5 +17,11 @@
 (define-syntax-rule (test attrs)
   (+ . attrs))
 
-(let ([attrs '(a b c d)])
-  (choose-list attrs))
+;; (let ([attrs '(a b c d)])
+;;   (choose-list attrs))
+
+(define (testfn a [b (length a)])
+  (displayln a)
+  (displayln b))
+
+(testfn '(1 2 3 4))
